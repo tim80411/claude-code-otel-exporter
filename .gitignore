@@ -41,3 +41,7 @@ Thumbs.db
 # Build output
 dist/
 bin/
+/exporter
+
+# Claude Code
+.claude/
