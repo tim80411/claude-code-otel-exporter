@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-code-otel-exporter
+  labels:
+    app: claude-code-otel-exporter
+spec:
+  schedule: "0 * * * *"  # Every hour
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: claude-code-otel-exporter
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: exporter
+              image: claude-code-otel-exporter:latest
+              envFrom:
+                - secretRef:
+                    name: claude-code-otel-exporter
+              volumeMounts:
+                - name: state
+                  mountPath: /data
+          volumes:
+            - name: state
+              persistentVolumeClaim:
+                claimName: claude-code-otel-exporter-state
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claude-code-otel-exporter
+type: Opaque
+stringData:
+  SOURCE_DIR: "/data/source"
+  STATE_FILE_PATH: "/data/otel-state.json"
+  COLLECTOR_ENDPOINT: "otel-collector:4317"
+  COLLECTOR_INSECURE: "true"
+  DATA_SOURCE: "local"
+  # LOKI_ENDPOINT: "https://loki.example.com/loki/api/v1/push"
+  # LOKI_BASIC_AUTH: ""
+  # S3_ENDPOINT: ""
+  # S3_BUCKET: ""
+  # S3_ACCESS_KEY: ""
+  # S3_SECRET_KEY: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-code-otel-exporter-state
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi

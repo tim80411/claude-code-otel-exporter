@@ -7,15 +7,22 @@ import (
 	"strings"
 	"time"
 
+	"fmt"
+
 	"github.com/tim80411/claude-code-otel-exporter/internal/config"
+	"github.com/tim80411/claude-code-otel-exporter/internal/events"
+	"github.com/tim80411/claude-code-otel-exporter/internal/exporter"
+	"github.com/tim80411/claude-code-otel-exporter/internal/metrics"
 	"github.com/tim80411/claude-code-otel-exporter/internal/parser"
 	"github.com/tim80411/claude-code-otel-exporter/internal/reader"
+	"github.com/tim80411/claude-code-otel-exporter/internal/retry"
 	"github.com/tim80411/claude-code-otel-exporter/internal/state"
 )
 
 type PipelineResult struct {
 	FilesProcessed   int
 	SessionsExported int
+	ParseErrors      int
 }
 
 func main() {
@@ -29,6 +36,12 @@ func main() {
 	logger := newLogger(cfg.LogLevel)
 	slog.SetDefault(logger)
 	logger.Info("config loaded", cfg.LogFields()...)
+
+	if err := cfg.Preflight(); err != nil {
+		logger.Error("preflight check failed", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("preflight checks passed")
 
 	start := time.Now()
 	result, err := runPipeline(context.Background(), cfg, logger)
@@ -44,21 +57,45 @@ func main() {
 	)
 }
 
-func runPipeline(_ context.Context, cfg *config.Config, log *slog.Logger) (PipelineResult, error) {
+func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (PipelineResult, error) {
+	pipelineStart := time.Now()
+
 	// 1. Load state
 	store := state.NewStore(cfg.StateFilePath)
 	if err := store.Load(); err != nil {
 		return PipelineResult{}, err
 	}
 
-	// 2. Create reader
-	lr, err := reader.NewLocalReader(cfg.SourceDir, store.Files(), log)
-	if err != nil {
-		return PipelineResult{}, err
+	// 2. Create reader based on data source
+	var (
+		r        reader.Reader
+		s3Reader *reader.S3Reader // kept for temp cleanup
+		readerErr error
+	)
+	switch cfg.DataSource {
+	case "s3":
+		s3Reader, readerErr = reader.NewS3Reader(reader.S3Config{
+			Endpoint:  cfg.S3Endpoint,
+			Bucket:    cfg.S3Bucket,
+			AccessKey: cfg.S3AccessKey,
+			SecretKey: cfg.S3SecretKey,
+			Region:    cfg.S3Region,
+			UseSSL:    cfg.S3UseSSL,
+		}, store.Files(), log)
+		if readerErr != nil {
+			return PipelineResult{}, readerErr
+		}
+		defer os.RemoveAll(s3Reader.TempDir())
+		r = s3Reader
+	default:
+		r, readerErr = reader.NewLocalReader(cfg.SourceDir, store.Files(), log)
+		if readerErr != nil {
+			return PipelineResult{}, readerErr
+		}
 	}
 
 	// 3. Scan for new/changed files
-	files, err := lr.Scan()
+	files, err := r.Scan()
 	if err != nil {
 		return PipelineResult{}, err
 	}
@@ -73,16 +110,24 @@ func runPipeline(_ context.Context, cfg *config.Config, log *slog.Logger) (Pipel
 
 	// 5. Parse each file
 	var allSessions []parser.Session
+	var parseErrors int
 	for _, f := range files {
-		file, err := os.Open(f.Path)
+		// For S3, use temp file path; for local, Path is already absolute.
+		openPath := f.Path
+		if s3Reader != nil {
+			openPath = s3Reader.LocalPath(f.Path)
+		}
+		file, err := os.Open(openPath)
 		if err != nil {
 			log.Warn("skipping file", "path", f.Path, "error", err)
+			parseErrors++
 			continue
 		}
 		sessions, err := parser.Parse(file, log)
 		file.Close()
 		if err != nil {
 			log.Warn("parse failed", "path", f.Path, "error", err)
+			parseErrors++
 			continue
 		}
 		for i := range sessions {
@@ -93,9 +138,60 @@ func runPipeline(_ context.Context, cfg *config.Config, log *slog.Logger) (Pipel
 
 	log.Info("parsed sessions", "count", len(allSessions))
 
-	// 6. [Story 3+ placeholder: export sessions via OTLP]
+	// 6. Init OTLP exporter
+	exp, err := exporter.New(ctx, cfg, log)
+	if err != nil {
+		return PipelineResult{}, err
+	}
+	defer func() {
+		sCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if sErr := exp.Shutdown(sCtx); sErr != nil {
+			log.Warn("exporter shutdown error", "error", sErr)
+		}
+	}()
 
-	// 7. Mark all files as processed
+	// 7. Deduplicate cross-file sessions and record metrics
+	uniqueSessions := metrics.DeduplicateSessions(allSessions)
+	log.Info("unique sessions", "count", len(uniqueSessions))
+
+	meter := exp.MeterProvider().Meter("claude-code-otel-exporter")
+	rec, err := metrics.NewRecorder(meter, log)
+	if err != nil {
+		return PipelineResult{}, fmt.Errorf("pipeline: create recorder: %w", err)
+	}
+	rec.Record(ctx, uniqueSessions)
+	rec.RecordHealth(ctx, len(files), parseErrors, time.Since(pipelineStart).Milliseconds())
+
+	// 8. Push events to Loki (if configured)
+	if cfg.LokiEndpoint != "" {
+		var allEvents []events.Event
+		for _, sess := range uniqueSessions {
+			allEvents = append(allEvents, events.ExtractEvents(sess)...)
+		}
+		log.Info("events extracted", "count", len(allEvents))
+
+		loki := events.NewLokiClient(cfg.LokiEndpoint, cfg.LokiBasicAuth)
+		if err := retry.Do(ctx, cfg.ExportMaxRetries, "loki-push", log, func() error {
+			eCtx, eCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer eCancel()
+			return loki.Push(eCtx, allEvents)
+		}); err != nil {
+			return PipelineResult{}, fmt.Errorf("pipeline: push events: %w", err)
+		}
+		log.Info("events pushed to loki")
+	}
+
+	// 9. Flush metrics with retry — failure prevents state save
+	if err := retry.Do(ctx, cfg.ExportMaxRetries, "metrics-flush", log, func() error {
+		fCtx, fCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer fCancel()
+		return exp.ForceFlush(fCtx)
+	}); err != nil {
+		return PipelineResult{}, fmt.Errorf("pipeline: flush metrics: %w", err)
+	}
+
+	// 10. Mark all files as processed
 	now := time.Now().UTC()
 	for _, f := range files {
 		store.MarkProcessed(f.Path, state.FileState{
@@ -105,12 +201,12 @@ func runPipeline(_ context.Context, cfg *config.Config, log *slog.Logger) (Pipel
 		})
 	}
 
-	// 8. Save state
+	// 11. Save state
 	if err := store.Save(); err != nil {
 		return PipelineResult{}, err
 	}
 
-	return PipelineResult{FilesProcessed: len(files)}, nil
+	return PipelineResult{FilesProcessed: len(files), SessionsExported: len(uniqueSessions), ParseErrors: parseErrors}, nil
 }
 
 func newLogger(level string) *slog.Logger {
