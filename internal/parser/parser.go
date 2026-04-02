@@ -96,6 +96,7 @@ func parseMessage(raw RawLine) (Message, error) {
 		Role:      raw.Message.Role,
 		Timestamp: ts,
 		UUID:      raw.UUID,
+		Model:     raw.Message.Model,
 		Usage:     raw.Message.Usage,
 		Content:   content,
 	}, nil

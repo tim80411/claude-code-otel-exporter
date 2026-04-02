@@ -28,6 +28,8 @@ type Usage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	Ephemeral5mInputTokens   int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens   int `json:"ephemeral_1h_input_tokens"`
 }
 
 // ContentBlock is one element of the content array.
@@ -50,6 +52,7 @@ type Message struct {
 	Role      string
 	Timestamp time.Time
 	UUID      string
+	Model     string
 	Usage     *Usage
 	Content   []ContentBlock
 }
