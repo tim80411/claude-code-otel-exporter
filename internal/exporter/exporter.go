@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
@@ -22,17 +22,17 @@ type Provider struct {
 type Option func(*options)
 
 type options struct {
-	reader sdkmetric.Reader // nil = build PeriodicReader from gRPC config
+	reader sdkmetric.Reader // nil = build PeriodicReader from HTTP config
 }
 
-// WithReader overrides the default PeriodicReader+gRPC exporter.
+// WithReader overrides the default PeriodicReader+HTTP exporter.
 // Use with sdkmetric.NewManualReader() in tests.
 func WithReader(r sdkmetric.Reader) Option {
 	return func(o *options) { o.reader = r }
 }
 
-// New creates a Provider with an OTLP gRPC metric exporter.
-// When opts includes WithReader, the gRPC connection is skipped.
+// New creates a Provider with an OTLP HTTP metric exporter.
+// When opts includes WithReader, the HTTP connection is skipped.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts ...Option) (*Provider, error) {
 	var o options
 	for _, fn := range opts {
@@ -41,18 +41,23 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts ...Opti
 
 	reader := o.reader
 	if reader == nil {
-		grpcOpts := []otlpmetricgrpc.Option{
-			otlpmetricgrpc.WithEndpoint(cfg.CollectorEndpoint),
+		httpOpts := []otlpmetrichttp.Option{
+			otlpmetrichttp.WithEndpoint(cfg.CollectorEndpoint),
 		}
 		if cfg.CollectorInsecure {
-			grpcOpts = append(grpcOpts, otlpmetricgrpc.WithInsecure())
+			httpOpts = append(httpOpts, otlpmetrichttp.WithInsecure())
+		}
+		if cfg.CollectorBasicAuth != "" {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithHeaders(map[string]string{
+				"Authorization": "Basic " + cfg.CollectorBasicAuth,
+			}))
 		}
 
-		exp, err := otlpmetricgrpc.New(ctx, grpcOpts...)
+		exp, err := otlpmetrichttp.New(ctx, httpOpts...)
 		if err != nil {
-			return nil, fmt.Errorf("exporter: connect gRPC: %w", err)
+			return nil, fmt.Errorf("exporter: connect HTTP: %w", err)
 		}
-		log.Info("OTLP gRPC exporter connected", "endpoint", cfg.CollectorEndpoint, "insecure", cfg.CollectorInsecure)
+		log.Info("OTLP HTTP exporter connected", "endpoint", cfg.CollectorEndpoint, "insecure", cfg.CollectorInsecure)
 
 		reader = sdkmetric.NewPeriodicReader(exp)
 	}
@@ -81,7 +86,6 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts ...Opti
 }
 
 // MeterProvider returns the underlying SDK MeterProvider.
-// TIM-124 uses this to create metric instruments.
 func (p *Provider) MeterProvider() *sdkmetric.MeterProvider {
 	return p.mp
 }

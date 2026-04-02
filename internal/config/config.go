@@ -17,8 +17,9 @@ type Config struct {
 
 	ServiceName       string `envconfig:"SERVICE_NAME"       default:"claude-code-otel-exporter"`
 	ServiceVersion    string `envconfig:"SERVICE_VERSION"    default:"dev"`
-	CollectorInsecure bool   `envconfig:"COLLECTOR_INSECURE" default:"false"`
-	LogLevel          string `envconfig:"LOG_LEVEL"          default:"info"`
+	CollectorInsecure   bool   `envconfig:"COLLECTOR_INSECURE"    default:"false"`
+	CollectorBasicAuth  string `envconfig:"COLLECTOR_BASIC_AUTH"`
+	LogLevel            string `envconfig:"LOG_LEVEL"             default:"info"`
 
 	LokiEndpoint  string `envconfig:"LOKI_ENDPOINT"`
 	LokiBasicAuth string `envconfig:"LOKI_BASIC_AUTH"`
@@ -53,8 +54,8 @@ var validLogLevels = map[string]bool{
 }
 
 func (c *Config) validate() error {
-	if _, _, err := net.SplitHostPort(c.CollectorEndpoint); err != nil {
-		return fmt.Errorf("config: COLLECTOR_ENDPOINT %q: must be host:port (e.g. otel-collector:4317): %w", c.CollectorEndpoint, err)
+	if c.CollectorEndpoint == "" {
+		return fmt.Errorf("config: COLLECTOR_ENDPOINT is required")
 	}
 	if !validLogLevels[c.LogLevel] {
 		return fmt.Errorf("config: LOG_LEVEL %q: must be one of debug, info, warn, error", c.LogLevel)
@@ -76,8 +77,13 @@ func (c *Config) validate() error {
 
 // Preflight checks external service reachability and state path writability.
 func (c *Config) Preflight() error {
-	// Check collector connectivity.
-	conn, err := net.DialTimeout("tcp", c.CollectorEndpoint, 5*time.Second)
+	// Check collector connectivity via TCP.
+	host := c.CollectorEndpoint
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		// No port specified — try HTTPS default.
+		host = host + ":443"
+	}
+	conn, err := net.DialTimeout("tcp", host, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("config: COLLECTOR_ENDPOINT %q unreachable: %w", c.CollectorEndpoint, err)
 	}
