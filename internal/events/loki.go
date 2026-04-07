@@ -36,12 +36,27 @@ type lokiStream struct {
 	Values [][]string        `json:"values"`
 }
 
-// Push sends events to Loki as a single batch.
+const defaultBatchSize = 1000
+
+// Push sends events to Loki in batches to avoid 413 Request Entity Too Large.
 func (c *LokiClient) Push(ctx context.Context, events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
+	for i := 0; i < len(events); i += defaultBatchSize {
+		end := i + defaultBatchSize
+		if end > len(events) {
+			end = len(events)
+		}
+		if err := c.pushBatch(ctx, events[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *LokiClient) pushBatch(ctx context.Context, events []Event) error {
 	values := make([][]string, 0, len(events))
 	for _, ev := range events {
 		bodyJSON, err := json.Marshal(ev.Body)
