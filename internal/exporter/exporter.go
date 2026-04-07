@@ -52,6 +52,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts ...Opti
 				"Authorization": "Basic " + cfg.CollectorBasicAuth,
 			}))
 		}
+		if cfg.CollectorURLPath != "" {
+			httpOpts = append(httpOpts, otlpmetrichttp.WithURLPath(cfg.CollectorURLPath))
+		}
 
 		exp, err := otlpmetrichttp.New(ctx, httpOpts...)
 		if err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/tim80411/claude-code-otel-exporter/internal/parser"
 	"github.com/tim80411/claude-code-otel-exporter/internal/reader"
 	"github.com/tim80411/claude-code-otel-exporter/internal/retry"
+	"github.com/tim80411/claude-code-otel-exporter/internal/s3state"
 	"github.com/tim80411/claude-code-otel-exporter/internal/state"
 )
 
@@ -59,6 +60,28 @@ func main() {
 
 func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (PipelineResult, error) {
 	pipelineStart := time.Now()
+
+	// 0. If local state file is missing and S3 config is available, restore from S3
+	var s3StateClient *s3state.Client
+	if cfg.S3Endpoint != "" && cfg.S3Bucket != "" && cfg.S3AccessKey != "" && cfg.S3SecretKey != "" {
+		c, err := s3state.NewClient(s3state.Config{
+			Endpoint:  cfg.S3Endpoint,
+			Bucket:    cfg.S3Bucket,
+			AccessKey: cfg.S3AccessKey,
+			SecretKey: cfg.S3SecretKey,
+			Region:    cfg.S3Region,
+			UseSSL:    cfg.S3UseSSL,
+		}, log)
+		if err != nil {
+			log.Warn("s3state client creation failed, continuing without S3 state backup", "error", err)
+		} else {
+			s3StateClient = c
+			if _, err := os.Stat(cfg.StateFilePath); os.IsNotExist(err) {
+				log.Info("local state file missing, attempting S3 restore")
+				s3StateClient.Download(ctx, cfg.StateFilePath)
+			}
+		}
+	}
 
 	// 1. Load state
 	store := state.NewStore(cfg.StateFilePath)
@@ -204,6 +227,11 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 	// 11. Save state
 	if err := store.Save(); err != nil {
 		return PipelineResult{}, err
+	}
+
+	// 12. Backup state to S3
+	if s3StateClient != nil {
+		s3StateClient.Upload(ctx, cfg.StateFilePath)
 	}
 
 	return PipelineResult{FilesProcessed: len(files), SessionsExported: len(uniqueSessions), ParseErrors: parseErrors}, nil

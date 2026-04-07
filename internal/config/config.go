@@ -19,6 +19,7 @@ type Config struct {
 	ServiceVersion    string `envconfig:"SERVICE_VERSION"    default:"dev"`
 	CollectorInsecure   bool   `envconfig:"COLLECTOR_INSECURE"    default:"false"`
 	CollectorBasicAuth  string `envconfig:"COLLECTOR_BASIC_AUTH"`
+	CollectorURLPath    string `envconfig:"COLLECTOR_URL_PATH"`
 	LogLevel            string `envconfig:"LOG_LEVEL"             default:"info"`
 
 	LokiEndpoint  string `envconfig:"LOKI_ENDPOINT"`
