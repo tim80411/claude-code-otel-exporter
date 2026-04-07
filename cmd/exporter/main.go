@@ -194,7 +194,7 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 		}
 		log.Info("events extracted", "count", len(allEvents))
 
-		loki := events.NewLokiClient(cfg.LokiEndpoint, cfg.LokiBasicAuth)
+		loki := events.NewLokiClient(cfg.LokiEndpoint, cfg.LokiBasicAuth, log)
 		if err := retry.Do(ctx, cfg.ExportMaxRetries, "loki-push", log, func() error {
 			eCtx, eCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer eCancel()

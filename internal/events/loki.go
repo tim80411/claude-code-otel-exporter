@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,14 +17,16 @@ type LokiClient struct {
 	endpoint  string
 	basicAuth string
 	client    *http.Client
+	logger    *slog.Logger
 }
 
 // NewLokiClient creates a client for the Loki push API.
-func NewLokiClient(endpoint, basicAuth string) *LokiClient {
+func NewLokiClient(endpoint, basicAuth string, logger *slog.Logger) *LokiClient {
 	return &LokiClient{
 		endpoint:  endpoint,
 		basicAuth: basicAuth,
 		client:    &http.Client{Timeout: 30 * time.Second},
+		logger:    logger,
 	}
 }
 
@@ -95,6 +99,12 @@ func (c *LokiClient) pushBatch(ctx context.Context, events []Event) error {
 		return fmt.Errorf("loki: push: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		c.logger.Warn("loki: batch rejected (likely too old), skipping", "status", resp.StatusCode, "body", string(body))
+		return nil
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("loki: push returned status %d", resp.StatusCode)
