@@ -9,4 +9,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /exporter ./
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /exporter /exporter
+COPY --from=builder /tmp /tmp
 ENTRYPOINT ["/exporter"]
