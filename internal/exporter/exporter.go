@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 
@@ -43,6 +44,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts ...Opti
 	if reader == nil {
 		httpOpts := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(cfg.CollectorEndpoint),
+			// Force cumulative temporality — Prometheus OTLP receiver silently drops delta counters.
+			otlpmetrichttp.WithTemporalitySelector(func(_ sdkmetric.InstrumentKind) metricdata.Temporality {
+				return metricdata.CumulativeTemporality
+			}),
 		}
 		if cfg.CollectorInsecure {
 			httpOpts = append(httpOpts, otlpmetrichttp.WithInsecure())
