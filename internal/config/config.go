@@ -38,6 +38,7 @@ type Config struct {
 
 	RemoteWriteEndpoint string `envconfig:"REMOTE_WRITE_ENDPOINT" required:"true"`
 	RemoteWriteAuth     string `envconfig:"REMOTE_WRITE_AUTH"`
+	RetentionDays       int    `envconfig:"RETENTION_DAYS"       default:"30"`
 }
 
 func Load() (*Config, error) {

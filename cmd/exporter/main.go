@@ -198,7 +198,8 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 
 func runBackfill(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session) error {
 	buckets := backfill.Aggregate(sessions, time.Minute)
-	series := backfill.BuildTimeSeries(buckets, cfg.ServiceName)
+	cutoff := time.Now().Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour)
+	series := backfill.BuildTimeSeries(buckets, cfg.ServiceName, cutoff)
 	log.Info("backfill: time series built", "buckets", len(buckets), "series", len(series))
 
 	writer := backfill.NewWriter(cfg.RemoteWriteEndpoint, cfg.RemoteWriteAuth, log)

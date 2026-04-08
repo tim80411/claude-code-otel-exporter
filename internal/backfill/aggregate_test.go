@@ -94,7 +94,7 @@ func TestBuildTimeSeries_PrefixSum(t *testing.T) {
 		{Time: mustParseTime(t, "2025-03-01T12:00:00Z"), Sessions: 2},
 	}
 
-	series := BuildTimeSeries(buckets, "test-job")
+	series := BuildTimeSeries(buckets, "test-job", time.Time{})
 
 	// Find session count series.
 	var sessionSeries *TimeSeries
@@ -133,7 +133,7 @@ func TestBuildTimeSeries_Labels(t *testing.T) {
 		},
 	}
 
-	series := BuildTimeSeries(buckets, "my-job")
+	series := BuildTimeSeries(buckets, "my-job", time.Time{})
 
 	// Verify job label is present on all series.
 	for _, s := range series {
@@ -169,7 +169,7 @@ func TestBuildTimeSeries_SkipsZero(t *testing.T) {
 		{Time: mustParseTime(t, "2025-03-01T10:00:00Z"), Sessions: 1},
 	}
 
-	series := BuildTimeSeries(buckets, "test")
+	series := BuildTimeSeries(buckets, "test", time.Time{})
 
 	// No commit or PR series should exist (all zero).
 	for _, s := range series {

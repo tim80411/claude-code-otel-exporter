@@ -116,7 +116,17 @@ type Sample struct {
 
 // BuildTimeSeries converts sorted buckets into cumulative TimeSeries.
 // Values are prefix-summed so Prometheus sees monotonically increasing counters.
-func BuildTimeSeries(buckets []Bucket, jobLabel string) []TimeSeries {
+// Buckets older than cutoff are dropped to avoid Prometheus rejection.
+func BuildTimeSeries(buckets []Bucket, jobLabel string, cutoff time.Time) []TimeSeries {
+	// Filter out buckets older than retention cutoff.
+	filtered := buckets[:0:0]
+	for _, b := range buckets {
+		if !b.Time.Before(cutoff) {
+			filtered = append(filtered, b)
+		}
+	}
+	buckets = filtered
+
 	if len(buckets) == 0 {
 		return nil
 	}
