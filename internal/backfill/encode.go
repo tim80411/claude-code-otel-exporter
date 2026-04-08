@@ -54,7 +54,7 @@ func encodeSample(s Sample) []byte {
 	buf = binary.LittleEndian.AppendUint64(buf, math.Float64bits(s.Value))
 	// field 2: int64 (wire type 0 = varint)
 	buf = appendTag(buf, 2, wireVarint)
-	buf = binary.AppendVarint(buf, s.TimestampMs)
+	buf = binary.AppendUvarint(buf, uint64(s.TimestampMs))
 	return buf
 }
 
