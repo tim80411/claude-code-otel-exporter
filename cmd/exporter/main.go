@@ -9,9 +9,9 @@ import (
 
 	"fmt"
 
+	"github.com/tim80411/claude-code-otel-exporter/internal/backfill"
 	"github.com/tim80411/claude-code-otel-exporter/internal/config"
 	"github.com/tim80411/claude-code-otel-exporter/internal/events"
-	"github.com/tim80411/claude-code-otel-exporter/internal/exporter"
 	"github.com/tim80411/claude-code-otel-exporter/internal/metrics"
 	"github.com/tim80411/claude-code-otel-exporter/internal/parser"
 	"github.com/tim80411/claude-code-otel-exporter/internal/reader"
@@ -59,8 +59,6 @@ func main() {
 }
 
 func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (PipelineResult, error) {
-	pipelineStart := time.Now()
-
 	// 0. If local state file is missing and S3 config is available, restore from S3
 	var s3StateClient *s3state.Client
 	if cfg.S3Endpoint != "" && cfg.S3Bucket != "" && cfg.S3AccessKey != "" && cfg.S3SecretKey != "" {
@@ -161,57 +159,18 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 
 	log.Info("parsed sessions", "count", len(allSessions))
 
-	// 6. Init OTLP exporter
-	exp, err := exporter.New(ctx, cfg, log)
-	if err != nil {
-		return PipelineResult{}, err
-	}
-	defer func() {
-		sCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if sErr := exp.Shutdown(sCtx); sErr != nil {
-			log.Warn("exporter shutdown error", "error", sErr)
-		}
-	}()
-
-	// 7. Deduplicate cross-file sessions and record metrics
+	// 6-9. Deduplicate and export metrics.
 	uniqueSessions := metrics.DeduplicateSessions(allSessions)
 	log.Info("unique sessions", "count", len(uniqueSessions))
 
-	meter := exp.MeterProvider().Meter("claude-code-otel-exporter")
-	rec, err := metrics.NewRecorder(meter, log)
-	if err != nil {
-		return PipelineResult{}, fmt.Errorf("pipeline: create recorder: %w", err)
-	}
-	rec.Record(ctx, uniqueSessions)
-	rec.RecordHealth(ctx, len(files), parseErrors, time.Since(pipelineStart).Milliseconds())
-
-	// 8. Push events to Loki (if configured)
-	if cfg.LokiEndpoint != "" {
-		var allEvents []events.Event
-		for _, sess := range uniqueSessions {
-			allEvents = append(allEvents, events.ExtractEvents(sess)...)
-		}
-		log.Info("events extracted", "count", len(allEvents))
-
-		loki := events.NewLokiClient(cfg.LokiEndpoint, cfg.LokiBasicAuth, log)
-		if err := retry.Do(ctx, cfg.ExportMaxRetries, "loki-push", log, func() error {
-			eCtx, eCancel := context.WithTimeout(ctx, 30*time.Second)
-			defer eCancel()
-			return loki.Push(eCtx, allEvents)
-		}); err != nil {
-			return PipelineResult{}, fmt.Errorf("pipeline: push events: %w", err)
-		}
-		log.Info("events pushed to loki")
+	// 6-9. Aggregate + Remote Write (per-minute buckets with real timestamps).
+	if err := runBackfill(ctx, cfg, log, uniqueSessions); err != nil {
+		return PipelineResult{}, err
 	}
 
-	// 9. Flush metrics with retry — failure prevents state save
-	if err := retry.Do(ctx, cfg.ExportMaxRetries, "metrics-flush", log, func() error {
-		fCtx, fCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer fCancel()
-		return exp.ForceFlush(fCtx)
-	}); err != nil {
-		return PipelineResult{}, fmt.Errorf("pipeline: flush metrics: %w", err)
+	// Push events to Loki (if configured) — both modes.
+	if err := pushEvents(ctx, cfg, log, uniqueSessions); err != nil {
+		return PipelineResult{}, err
 	}
 
 	// 10. Mark all files as processed
@@ -235,6 +194,46 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 	}
 
 	return PipelineResult{FilesProcessed: len(files), SessionsExported: len(uniqueSessions), ParseErrors: parseErrors}, nil
+}
+
+func runBackfill(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session) error {
+	buckets := backfill.Aggregate(sessions, time.Minute)
+	series := backfill.BuildTimeSeries(buckets, cfg.ServiceName)
+	log.Info("backfill: time series built", "buckets", len(buckets), "series", len(series))
+
+	writer := backfill.NewWriter(cfg.RemoteWriteEndpoint, cfg.RemoteWriteAuth, log)
+	if err := retry.Do(ctx, cfg.ExportMaxRetries, "backfill-remote-write", log, func() error {
+		rCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return writer.Write(rCtx, series)
+	}); err != nil {
+		return fmt.Errorf("backfill: remote write: %w", err)
+	}
+	log.Info("backfill: metrics pushed")
+	return nil
+}
+
+func pushEvents(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session) error {
+	if cfg.LokiEndpoint == "" {
+		return nil
+	}
+
+	var allEvents []events.Event
+	for _, sess := range sessions {
+		allEvents = append(allEvents, events.ExtractEvents(sess)...)
+	}
+	log.Info("events extracted", "count", len(allEvents))
+
+	loki := events.NewLokiClient(cfg.LokiEndpoint, cfg.LokiBasicAuth, log)
+	if err := retry.Do(ctx, cfg.ExportMaxRetries, "loki-push", log, func() error {
+		eCtx, eCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer eCancel()
+		return loki.Push(eCtx, allEvents)
+	}); err != nil {
+		return fmt.Errorf("pipeline: push events: %w", err)
+	}
+	log.Info("events pushed to loki")
+	return nil
 }
 
 func newLogger(level string) *slog.Logger {

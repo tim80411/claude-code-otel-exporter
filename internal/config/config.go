@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,7 +14,7 @@ import (
 type Config struct {
 	SourceDir         string `envconfig:"SOURCE_DIR"`
 	StateFilePath     string `envconfig:"STATE_FILE_PATH"      required:"true"`
-	CollectorEndpoint string `envconfig:"COLLECTOR_ENDPOINT"   required:"true"`
+	CollectorEndpoint string `envconfig:"COLLECTOR_ENDPOINT"`
 
 	ServiceName       string `envconfig:"SERVICE_NAME"       default:"claude-code-otel-exporter"`
 	ServiceVersion    string `envconfig:"SERVICE_VERSION"    default:"dev"`
@@ -34,6 +35,9 @@ type Config struct {
 	S3SecretKey string `envconfig:"S3_SECRET_KEY"`
 	S3Region    string `envconfig:"S3_REGION"     default:"us-east-1"`
 	S3UseSSL    bool   `envconfig:"S3_USE_SSL"    default:"true"`
+
+	RemoteWriteEndpoint string `envconfig:"REMOTE_WRITE_ENDPOINT" required:"true"`
+	RemoteWriteAuth     string `envconfig:"REMOTE_WRITE_AUTH"`
 }
 
 func Load() (*Config, error) {
@@ -55,9 +59,6 @@ var validLogLevels = map[string]bool{
 }
 
 func (c *Config) validate() error {
-	if c.CollectorEndpoint == "" {
-		return fmt.Errorf("config: COLLECTOR_ENDPOINT is required")
-	}
 	if !validLogLevels[c.LogLevel] {
 		return fmt.Errorf("config: LOG_LEVEL %q: must be one of debug, info, warn, error", c.LogLevel)
 	}
@@ -78,15 +79,14 @@ func (c *Config) validate() error {
 
 // Preflight checks external service reachability and state path writability.
 func (c *Config) Preflight() error {
-	// Check collector connectivity via TCP.
-	host := c.CollectorEndpoint
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		// No port specified — try HTTPS default.
-		host = host + ":443"
+	// Check Remote Write endpoint connectivity via TCP.
+	host, err := resolveHost(c.RemoteWriteEndpoint)
+	if err != nil {
+		return fmt.Errorf("config: REMOTE_WRITE_ENDPOINT %q: %w", c.RemoteWriteEndpoint, err)
 	}
 	conn, err := net.DialTimeout("tcp", host, 5*time.Second)
 	if err != nil {
-		return fmt.Errorf("config: COLLECTOR_ENDPOINT %q unreachable: %w", c.CollectorEndpoint, err)
+		return fmt.Errorf("config: REMOTE_WRITE_ENDPOINT %q unreachable: %w", c.RemoteWriteEndpoint, err)
 	}
 	conn.Close()
 
@@ -112,5 +112,23 @@ func (c *Config) LogFields() []any {
 	if c.LokiEndpoint != "" {
 		fields = append(fields, "loki_endpoint", c.LokiEndpoint)
 	}
+	fields = append(fields, "remote_write_endpoint", c.RemoteWriteEndpoint)
 	return fields
+}
+
+// resolveHost extracts a host:port suitable for TCP dial from a URL string.
+func resolveHost(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+	host := u.Host
+	if u.Port() == "" {
+		if u.Scheme == "https" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+	return host, nil
 }
