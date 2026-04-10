@@ -169,8 +169,12 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 	}
 
 	// Push events to Loki (if configured) — both modes.
-	if err := pushEvents(ctx, cfg, log, uniqueSessions); err != nil {
+	maxEventTime, err := pushEvents(ctx, cfg, log, uniqueSessions, store.LastEventTime())
+	if err != nil {
 		return PipelineResult{}, err
+	}
+	if !maxEventTime.IsZero() {
+		store.SetLastEventTime(maxEventTime)
 	}
 
 	// 10. Mark all files as processed
@@ -214,27 +218,45 @@ func runBackfill(ctx context.Context, cfg *config.Config, log *slog.Logger, sess
 	return nil
 }
 
-func pushEvents(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session) error {
+func pushEvents(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session, cutoff time.Time) (time.Time, error) {
 	if cfg.LokiEndpoint == "" {
-		return nil
+		return time.Time{}, nil
 	}
 
 	var allEvents []events.Event
 	for _, sess := range sessions {
 		allEvents = append(allEvents, events.ExtractEvents(sess)...)
 	}
-	log.Info("events extracted", "count", len(allEvents))
+
+	// Filter out events already sent in previous runs.
+	var filtered []events.Event
+	var maxTime time.Time
+	for _, ev := range allEvents {
+		if ev.Timestamp.After(cutoff) {
+			filtered = append(filtered, ev)
+			if ev.Timestamp.After(maxTime) {
+				maxTime = ev.Timestamp
+			}
+		}
+	}
+
+	log.Info("events extracted", "count", len(allEvents), "new", len(filtered), "skipped", len(allEvents)-len(filtered))
+
+	if len(filtered) == 0 {
+		log.Info("no new events to push")
+		return maxTime, nil
+	}
 
 	loki := events.NewLokiClient(cfg.LokiEndpoint, cfg.LokiBasicAuth, log)
 	if err := retry.Do(ctx, cfg.ExportMaxRetries, "loki-push", log, func() error {
 		eCtx, eCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer eCancel()
-		return loki.Push(eCtx, allEvents)
+		return loki.Push(eCtx, filtered)
 	}); err != nil {
-		return fmt.Errorf("pipeline: push events: %w", err)
+		return time.Time{}, fmt.Errorf("pipeline: push events: %w", err)
 	}
 	log.Info("events pushed to loki")
-	return nil
+	return maxTime, nil
 }
 
 func newLogger(level string) *slog.Logger {

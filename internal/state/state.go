@@ -18,8 +18,9 @@ type FileState struct {
 
 // StateData is the top-level structure persisted to disk.
 type StateData struct {
-	Version int                  `json:"version"`
-	Files   map[string]FileState `json:"files"`
+	Version       int                  `json:"version"`
+	Files         map[string]FileState `json:"files"`
+	LastEventTime time.Time            `json:"last_event_time,omitempty"`
 }
 
 // Store manages incremental processing state backed by a JSON file.
@@ -68,6 +69,16 @@ func (s *Store) Files() map[string]FileState {
 // MarkProcessed records that a file has been processed.
 func (s *Store) MarkProcessed(path string, fs FileState) {
 	s.data.Files[path] = fs
+}
+
+// LastEventTime returns the timestamp of the last event pushed to Loki.
+func (s *Store) LastEventTime() time.Time {
+	return s.data.LastEventTime
+}
+
+// SetLastEventTime records the timestamp of the latest event pushed to Loki.
+func (s *Store) SetLastEventTime(t time.Time) {
+	s.data.LastEventTime = t
 }
 
 // Save writes state to disk atomically (write tmp + rename).
