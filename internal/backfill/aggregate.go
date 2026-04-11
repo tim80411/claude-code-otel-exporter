@@ -10,17 +10,18 @@ import (
 
 // Bucket holds aggregated metrics for one time interval.
 type Bucket struct {
-	Time         time.Time
-	Sessions     int64
-	TokenInput   int64
-	TokenOutput  int64
-	TokenCacheR  int64
-	TokenCacheC  int64
-	CostByModel  map[string]float64
-	LinesAdded   int64
-	LinesRemoved int64
-	Commits      int64
-	PullRequests int64
+	Time               time.Time
+	Sessions           int64
+	TokenInput         int64
+	TokenOutput        int64
+	TokenCacheR        int64
+	TokenCacheC        int64
+	CostByModel        map[string]float64
+	APIRequestsByModel map[string]int64
+	LinesAdded         int64
+	LinesRemoved       int64
+	Commits            int64
+	PullRequests       int64
 }
 
 // Aggregate groups sessions into hourly buckets by StartTime.
@@ -36,7 +37,11 @@ func Aggregate(sessions []parser.Session, bucketSize time.Duration) []Bucket {
 		key := sess.StartTime.Truncate(bucketSize)
 		b, ok := index[key]
 		if !ok {
-			b = &Bucket{Time: key, CostByModel: make(map[string]float64)}
+			b = &Bucket{
+				Time:               key,
+				CostByModel:        make(map[string]float64),
+				APIRequestsByModel: make(map[string]int64),
+			}
 			index[key] = b
 		}
 
@@ -44,7 +49,7 @@ func Aggregate(sessions []parser.Session, bucketSize time.Duration) []Bucket {
 
 		// Token accumulation per model (replicates recorder.go logic).
 		type modelTokens struct {
-			input, output, cacheRead, cacheCreation int
+			input, output, cacheRead, cacheCreation, requests int
 		}
 		perModel := make(map[string]*modelTokens)
 		for _, msg := range sess.Messages {
@@ -60,6 +65,7 @@ func Aggregate(sessions []parser.Session, bucketSize time.Duration) []Bucket {
 			mt.output += msg.Usage.OutputTokens
 			mt.cacheRead += msg.Usage.CacheReadInputTokens
 			mt.cacheCreation += msg.Usage.CacheCreationInputTokens
+			mt.requests++
 		}
 
 		for model, mt := range perModel {
@@ -67,6 +73,7 @@ func Aggregate(sessions []parser.Session, bucketSize time.Duration) []Bucket {
 			b.TokenOutput += int64(mt.output)
 			b.TokenCacheR += int64(mt.cacheRead)
 			b.TokenCacheC += int64(mt.cacheCreation)
+			b.APIRequestsByModel[model] += int64(mt.requests)
 
 			pricing, known := metrics.LookupPricing(model)
 			if !known {
@@ -137,6 +144,9 @@ func BuildTimeSeries(buckets []Bucket, jobLabel string, cutoff time.Time) []Time
 		for m := range b.CostByModel {
 			modelSet[m] = struct{}{}
 		}
+		for m := range b.APIRequestsByModel {
+			modelSet[m] = struct{}{}
+		}
 	}
 	models := make([]string, 0, len(modelSet))
 	for m := range modelSet {
@@ -187,6 +197,18 @@ func BuildTimeSeries(buckets []Bucket, jobLabel string, cutoff time.Time) []Time
 		s := buildCumulativeSeries(
 			makeLabels("claude_code_cost_usage_total", Label{Name: "model", Value: m}),
 			buckets, func(b Bucket) float64 { return b.CostByModel[m] },
+		)
+		if len(s.Samples) > 0 {
+			series = append(series, s)
+		}
+	}
+
+	// api_request_count_total by model
+	for _, model := range models {
+		m := model
+		s := buildCumulativeSeries(
+			makeLabels("claude_code_api_request_count_total", Label{Name: "model", Value: m}),
+			buckets, func(b Bucket) float64 { return float64(b.APIRequestsByModel[m]) },
 		)
 		if len(s.Samples) > 0 {
 			series = append(series, s)

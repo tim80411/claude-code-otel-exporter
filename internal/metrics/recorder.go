@@ -16,6 +16,7 @@ type Recorder struct {
 	sessionCount     metric.Int64Counter
 	tokenUsage       metric.Int64Counter
 	costUsage        metric.Float64Counter
+	apiRequestCount  metric.Int64Counter
 	linesOfCode      metric.Int64Counter
 	commitCount      metric.Int64Counter
 	pullRequestCount metric.Int64Counter
@@ -45,6 +46,13 @@ func NewRecorder(m metric.Meter, logger *slog.Logger) (*Recorder, error) {
 	cu, err := m.Float64Counter("claude_code.cost.usage",
 		metric.WithDescription("Cost in USD across Claude Code sessions"),
 		metric.WithUnit("USD"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	arc, err := m.Int64Counter("claude_code.api_request.count",
+		metric.WithDescription("Number of API requests (assistant messages) by model"),
 	)
 	if err != nil {
 		return nil, err
@@ -97,6 +105,7 @@ func NewRecorder(m metric.Meter, logger *slog.Logger) (*Recorder, error) {
 		sessionCount:     sc,
 		tokenUsage:       tu,
 		costUsage:        cu,
+		apiRequestCount:  arc,
 		linesOfCode:      loc,
 		commitCount:      cc,
 		pullRequestCount: prc,
@@ -150,7 +159,7 @@ func (r *Recorder) recordOutput(ctx context.Context, sess parser.Session) {
 func (r *Recorder) recordTokensAndCost(ctx context.Context, sess parser.Session) {
 	// Accumulate tokens per model for cost calculation.
 	type modelTokens struct {
-		input, output, cacheRead, cacheCreation int
+		input, output, cacheRead, cacheCreation, requests int
 	}
 	perModel := make(map[string]*modelTokens)
 
@@ -169,6 +178,7 @@ func (r *Recorder) recordTokensAndCost(ctx context.Context, sess parser.Session)
 		mt.output += msg.Usage.OutputTokens
 		mt.cacheRead += msg.Usage.CacheReadInputTokens
 		mt.cacheCreation += msg.Usage.CacheCreationInputTokens
+		mt.requests++
 	}
 
 	typeAttr := func(t string) metric.AddOption {
@@ -176,6 +186,11 @@ func (r *Recorder) recordTokensAndCost(ctx context.Context, sess parser.Session)
 	}
 
 	for model, mt := range perModel {
+		if mt.requests > 0 {
+			r.apiRequestCount.Add(ctx, int64(mt.requests), metric.WithAttributes(
+				attribute.String("model", model),
+			))
+		}
 		if mt.input > 0 {
 			r.tokenUsage.Add(ctx, int64(mt.input), typeAttr("input"))
 		}
