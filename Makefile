@@ -1,4 +1,4 @@
-.PHONY: build run test lint docker-build docker-run clean
+.PHONY: build run test lint docker-build docker-run clean pricing-list pricing-check pricing-sync
 
 BINARY := claude-code-otel-exporter
 IMAGE  := claude-code-otel-exporter
@@ -39,3 +39,14 @@ docker-run: docker-build
 
 clean:
 	rm -f $(BINARY)
+
+# Anthropic model pricing is embedded from internal/metrics/pricing.json.
+# Use these targets to inspect / refresh prices against LiteLLM.
+pricing-list:
+	@./scripts/pricing-sync.sh list
+
+pricing-check:
+	@./scripts/pricing-sync.sh check
+
+pricing-sync:
+	@./scripts/pricing-sync.sh sync

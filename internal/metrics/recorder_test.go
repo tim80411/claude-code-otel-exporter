@@ -348,8 +348,8 @@ func TestRecord_CrossFileDedupIntegration(t *testing.T) {
 // ==================== TIM-126: Cost + Advanced Token tests ====================
 
 func TestRecord_CostCalculation(t *testing.T) {
-	// claude-opus-4-6: input $15/MTok, output $75/MTok
-	// 10000 input + 2000 output = (10000*15 + 2000*75) / 1_000_000 = 0.15 + 0.15 = 0.30
+	// claude-opus-4-6: input $5/MTok, output $25/MTok
+	// 10000 input + 2000 output = (10000*5 + 2000*25) / 1_000_000 = 0.05 + 0.05 = 0.10
 	rec, reader := setupRecorder(t)
 	sessions := []parser.Session{
 		{
@@ -365,8 +365,8 @@ func TestRecord_CostCalculation(t *testing.T) {
 
 	cu := findMetric(rm, "claude_code.cost.usage")
 	cost := floatSumValue(cu, attribute.String("model", "claude-opus-4-6"))
-	if !almostEqual(cost, 0.30, 0.0001) {
-		t.Errorf("cost = %f, want 0.30", cost)
+	if !almostEqual(cost, 0.10, 0.0001) {
+		t.Errorf("cost = %f, want 0.10", cost)
 	}
 }
 
@@ -386,10 +386,10 @@ func TestRecord_DifferentModels(t *testing.T) {
 	rm := collectMetrics(t, reader)
 
 	cu := findMetric(rm, "claude_code.cost.usage")
-	// opus: (10000*15 + 2000*75) / 1M = 0.30
+	// opus: (10000*5 + 2000*25) / 1M = 0.10
 	opusCost := floatSumValue(cu, attribute.String("model", "claude-opus-4-6"))
-	if !almostEqual(opusCost, 0.30, 0.0001) {
-		t.Errorf("opus cost = %f, want 0.30", opusCost)
+	if !almostEqual(opusCost, 0.10, 0.0001) {
+		t.Errorf("opus cost = %f, want 0.10", opusCost)
 	}
 	// sonnet: (10000*3 + 2000*15) / 1M = 0.06
 	sonnetCost := floatSumValue(cu, attribute.String("model", "claude-sonnet-4-6"))
@@ -426,12 +426,12 @@ func TestRecord_CacheTokenTypes(t *testing.T) {
 		t.Errorf("cacheCreation = %d, want 3000", v)
 	}
 
-	// Cost includes cache tokens: (1000*15 + 500*75 + 5000*1.5 + 3000*18.75) / 1M
-	// = (15000 + 37500 + 7500 + 56250) / 1M = 116250 / 1M = 0.11625
+	// Cost includes cache tokens: (1000*5 + 500*25 + 5000*0.5 + 3000*6.25) / 1M
+	// = (5000 + 12500 + 2500 + 18750) / 1M = 38750 / 1M = 0.03875
 	cu := findMetric(rm, "claude_code.cost.usage")
 	cost := floatSumValue(cu, attribute.String("model", "claude-opus-4-6"))
-	if !almostEqual(cost, 0.11625, 0.0001) {
-		t.Errorf("cost = %f, want 0.11625", cost)
+	if !almostEqual(cost, 0.03875, 0.0001) {
+		t.Errorf("cost = %f, want 0.03875", cost)
 	}
 }
 
