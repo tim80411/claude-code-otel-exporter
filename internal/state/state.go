@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/tim80411/claude-code-otel-exporter/internal/backfill"
 )
 
 // FileState records the processing state of a single file.
@@ -18,9 +20,11 @@ type FileState struct {
 
 // StateData is the top-level structure persisted to disk.
 type StateData struct {
-	Version       int                  `json:"version"`
-	Files         map[string]FileState `json:"files"`
-	LastEventTime time.Time            `json:"last_event_time,omitempty"`
+	Version          int                               `json:"version"`
+	Files            map[string]FileState              `json:"files"`
+	LastEventTime    time.Time                         `json:"last_event_time,omitempty"`
+	SessionSnapshots map[string]backfill.SessionTotals `json:"session_snapshots,omitempty"`
+	Cumulative       backfill.CumulativeTotals         `json:"cumulative"`
 }
 
 // Store manages incremental processing state backed by a JSON file.
@@ -79,6 +83,31 @@ func (s *Store) LastEventTime() time.Time {
 // SetLastEventTime records the timestamp of the latest event pushed to Loki.
 func (s *Store) SetLastEventTime(t time.Time) {
 	s.data.LastEventTime = t
+}
+
+// SessionSnapshots returns the per-session metric totals as of the last run.
+// A non-nil map is always returned; mutations on it must be followed by
+// SetSessionSnapshots to persist.
+func (s *Store) SessionSnapshots() map[string]backfill.SessionTotals {
+	if s.data.SessionSnapshots == nil {
+		s.data.SessionSnapshots = map[string]backfill.SessionTotals{}
+	}
+	return s.data.SessionSnapshots
+}
+
+// SetSessionSnapshots replaces the stored per-session totals.
+func (s *Store) SetSessionSnapshots(m map[string]backfill.SessionTotals) {
+	s.data.SessionSnapshots = m
+}
+
+// Cumulative returns the running cumulative counter values.
+func (s *Store) Cumulative() backfill.CumulativeTotals {
+	return s.data.Cumulative
+}
+
+// SetCumulative replaces the stored cumulative counter values.
+func (s *Store) SetCumulative(c backfill.CumulativeTotals) {
+	s.data.Cumulative = c
 }
 
 // Save writes state to disk atomically (write tmp + rename).

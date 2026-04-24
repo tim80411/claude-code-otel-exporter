@@ -163,8 +163,8 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 	uniqueSessions := metrics.DeduplicateSessions(allSessions)
 	log.Info("unique sessions", "count", len(uniqueSessions))
 
-	// 6-9. Aggregate + Remote Write (per-minute buckets with real timestamps).
-	if err := runBackfill(ctx, cfg, log, uniqueSessions); err != nil {
+	// 6-9. Apply per-session deltas to cumulative state + Remote Write snapshot.
+	if err := runBackfill(ctx, cfg, log, uniqueSessions, store); err != nil {
 		return PipelineResult{}, err
 	}
 
@@ -200,11 +200,38 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 	return PipelineResult{FilesProcessed: len(files), SessionsExported: len(uniqueSessions), ParseErrors: parseErrors}, nil
 }
 
-func runBackfill(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session) error {
-	buckets := backfill.Aggregate(sessions, time.Minute)
-	cutoff := time.Now().Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour)
-	series := backfill.BuildTimeSeries(buckets, cfg.ServiceName, cutoff)
-	log.Info("backfill: time series built", "buckets", len(buckets), "series", len(series))
+func runBackfill(ctx context.Context, cfg *config.Config, log *slog.Logger, sessions []parser.Session, store *state.Store) error {
+	// 1. Compute per-session totals and merge deltas into the cumulative counters
+	//    stored in state. Re-processing the same session only contributes the new
+	//    messages since last snapshot, keeping counters monotonic across runs.
+	snapshots := store.SessionSnapshots()
+	cumulative := store.Cumulative()
+
+	for _, sess := range sessions {
+		current := backfill.ComputeSessionTotals(sess)
+		prev := snapshots[sess.SessionID] // zero value if session is new
+		backfill.ApplySessionDelta(&cumulative, prev, current)
+		snapshots[sess.SessionID] = current
+	}
+
+	store.SetSessionSnapshots(snapshots)
+	store.SetCumulative(cumulative)
+
+	// 2. Build a snapshot of all cumulative counters at the current time.
+	//    One sample per series per run gives Prometheus strictly-increasing
+	//    counter semantics that `increase()` / `rate()` can reason about.
+	now := time.Now()
+	series := backfill.BuildSnapshotSeries(cumulative, now, cfg.ServiceName)
+	log.Info("backfill: snapshot built",
+		"series", len(series),
+		"sessions_seen_total", len(snapshots),
+		"cumulative_sessions", cumulative.Sessions,
+	)
+
+	if len(series) == 0 {
+		log.Info("backfill: nothing to push (cumulative totals are all zero)")
+		return nil
+	}
 
 	writer := backfill.NewWriter(cfg.RemoteWriteEndpoint, cfg.RemoteWriteAuth, log)
 	if err := retry.Do(ctx, cfg.ExportMaxRetries, "backfill-remote-write", log, func() error {
