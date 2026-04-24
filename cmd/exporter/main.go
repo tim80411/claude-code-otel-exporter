@@ -121,15 +121,15 @@ func runPipeline(ctx context.Context, cfg *config.Config, log *slog.Logger) (Pip
 		return PipelineResult{}, err
 	}
 
-	// 4. No new files → early return
 	if len(files) == 0 {
 		log.Info("no new files to process")
-		return PipelineResult{}, nil
+	} else {
+		log.Info("files to process", "count", len(files))
 	}
 
-	log.Info("files to process", "count", len(files))
-
-	// 5. Parse each file
+	// 5. Parse each file. If no files changed, we still fall through to step 6
+	//    so that a heartbeat snapshot of the current cumulative is written to
+	//    Prometheus — otherwise samples become sparse and increase()[1h] breaks.
 	var allSessions []parser.Session
 	var parseErrors int
 	for _, f := range files {
