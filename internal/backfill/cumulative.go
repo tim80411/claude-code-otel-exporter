@@ -57,6 +57,12 @@ func ComputeSessionTotals(sess parser.Session) SessionTotals {
 		if msg.Role != "assistant" || msg.Usage == nil {
 			continue
 		}
+		// Skip Claude Code's synthetic placeholder messages (tool injections,
+		// compaction markers, etc.) — they aren't real API calls and would
+		// otherwise pollute api_request_count_total{model="<synthetic>"}.
+		if msg.Model == "<synthetic>" || msg.Model == "" {
+			continue
+		}
 		mt, ok := perModel[msg.Model]
 		if !ok {
 			mt = &modelTokens{}
@@ -165,16 +171,24 @@ func BuildSnapshotSeries(cumulative CumulativeTotals, ts time.Time, jobLabel str
 	emit("claude_code_commit_count_total", cumulative.Commits)
 	emit("claude_code_pull_request_count_total", cumulative.PullRequests)
 
-	// Sort model keys for deterministic output.
+	// Sort model keys for deterministic output. Drop synthetic/empty model
+	// entries so residual cumulative values from before the filter was added
+	// stop leaking into Prometheus.
 	models := make([]string, 0, len(cumulative.CostByModel)+len(cumulative.RequestsByModel))
 	seen := map[string]bool{}
 	for m := range cumulative.CostByModel {
+		if m == "<synthetic>" || m == "" {
+			continue
+		}
 		if !seen[m] {
 			seen[m] = true
 			models = append(models, m)
 		}
 	}
 	for m := range cumulative.RequestsByModel {
+		if m == "<synthetic>" || m == "" {
+			continue
+		}
 		if !seen[m] {
 			seen[m] = true
 			models = append(models, m)

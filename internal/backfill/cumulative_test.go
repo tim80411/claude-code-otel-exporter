@@ -215,6 +215,67 @@ func TestBuildSnapshotSeries_JobLabelOnAll(t *testing.T) {
 	}
 }
 
+func TestComputeSessionTotals_SkipsSynthetic(t *testing.T) {
+	// Claude Code injects assistant messages with model "<synthetic>" (tool
+	// placeholders, compaction markers). They aren't real API calls and must
+	// not inflate api_request_count_total or claim a pricing slot.
+	sess := parser.Session{
+		SessionID: "s1",
+		StartTime: mustParseTime(t, "2025-03-01T10:00:00Z"),
+		Messages: []parser.Message{
+			{Role: "assistant", Model: "claude-sonnet-4-6",
+				Timestamp: mustParseTime(t, "2025-03-01T10:00:00Z"),
+				Usage:     &parser.Usage{InputTokens: 100, OutputTokens: 50}},
+			{Role: "assistant", Model: "<synthetic>",
+				Timestamp: mustParseTime(t, "2025-03-01T10:00:30Z"),
+				Usage:     &parser.Usage{InputTokens: 0, OutputTokens: 0}},
+			{Role: "assistant", Model: "",
+				Timestamp: mustParseTime(t, "2025-03-01T10:00:40Z"),
+				Usage:     &parser.Usage{InputTokens: 0, OutputTokens: 0}},
+		},
+	}
+
+	totals := ComputeSessionTotals(sess)
+
+	if totals.RequestsByModel["<synthetic>"] != 0 {
+		t.Errorf("<synthetic> should not be counted: got %d requests", totals.RequestsByModel["<synthetic>"])
+	}
+	if totals.RequestsByModel[""] != 0 {
+		t.Errorf("empty model should not be counted: got %d requests", totals.RequestsByModel[""])
+	}
+	if totals.RequestsByModel["claude-sonnet-4-6"] != 1 {
+		t.Errorf("real model should have 1 request: got %d", totals.RequestsByModel["claude-sonnet-4-6"])
+	}
+}
+
+func TestBuildSnapshotSeries_DropsResidualSynthetic(t *testing.T) {
+	// Simulate state files carrying pre-fix <synthetic> totals. The new emit
+	// path must not leak them back into Prometheus so the stale series decay
+	// under retention instead of getting refreshed every heartbeat.
+	cumulative := CumulativeTotals{
+		Sessions: 10,
+		CostByModel: map[string]float64{
+			"claude-sonnet-4-6": 12.5,
+			"<synthetic>":       0, // LookupPricing returned unknown, so should be 0
+		},
+		RequestsByModel: map[string]float64{
+			"claude-sonnet-4-6": 100,
+			"<synthetic>":       94,
+			"":                  3,
+		},
+	}
+
+	series := BuildSnapshotSeries(cumulative, time.Unix(1700000000, 0), "test")
+
+	for _, s := range series {
+		for _, l := range s.Labels {
+			if l.Name == "model" && (l.Value == "<synthetic>" || l.Value == "") {
+				t.Errorf("emitted forbidden model label: %q", l.Value)
+			}
+		}
+	}
+}
+
 func TestEndToEnd_CrossRunMonotonic(t *testing.T) {
 	// Simulate two runs with overlapping + new sessions; cumulative must be
 	// monotonic (strictly >= previous) across runs.
